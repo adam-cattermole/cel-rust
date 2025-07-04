@@ -5,6 +5,9 @@ pub mod ast;
 pub mod reference;
 pub mod references;
 
+#[cfg(feature = "protobuf")]
+pub mod protobuf;
+
 pub use ast::IdedExpr as Expression;
 
 mod macros;
