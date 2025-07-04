@@ -11,3 +11,11 @@ categories = ["parsing"]
 [dependencies]
 antlr4rust = "0.3.0-beta2"
 lazy_static = "1.5.0"
+prost = { version = "0.14", optional = true }
+prost-types = { version = "0.14", optional = true }
+
+[build-dependencies]
+prost-build = "0.14"
+
+[features]
+protobuf = ["dep:prost", "dep:prost-types"]
