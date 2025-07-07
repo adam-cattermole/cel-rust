@@ -6,12 +6,15 @@ pub mod protobuf {
 
     pub use types::*;
 
+    use crate::ast::{Expr as AstExpr, IdedExpr};
     use crate::reference::Val;
 
     #[derive(Debug, Clone, PartialEq)]
     pub enum ConversionError {
         MissingField { field: String },
+        InvalidExpressionKind,
         InvalidConstantKind,
+        InvalidId(String),
     }
 
     impl std::fmt::Display for ConversionError {
@@ -20,8 +23,14 @@ pub mod protobuf {
                 ConversionError::MissingField { field } => {
                     write!(f, "Missing required field: {}", field)
                 }
+                ConversionError::InvalidExpressionKind => {
+                    write!(f, "Invalid expression kind")
+                }
                 ConversionError::InvalidConstantKind => {
                     write!(f, "Invalid constant kind")
+                }
+                ConversionError::InvalidId(id) => {
+                    write!(f, "Invalid ID: {}", id)
                 }
             }
         }
@@ -69,13 +78,66 @@ pub mod protobuf {
         }
     }
 
+    impl From<AstExpr> for expr::ExprKind {
+        fn from(expr: AstExpr) -> Self {
+            match expr {
+                AstExpr::Ident(name) => expr::ExprKind::IdentExpr(expr::Ident { name }),
+                AstExpr::Literal(val) => expr::ExprKind::ConstExpr(Constant::from(val)),
+                _ => unimplemented!(),
+            }
+        }
+    }
+
+    impl TryFrom<expr::ExprKind> for AstExpr {
+        type Error = ConversionError;
+
+        fn try_from(expr_kind: expr::ExprKind) -> Result<Self, Self::Error> {
+            match expr_kind {
+                expr::ExprKind::IdentExpr(ident) => Ok(AstExpr::Ident(ident.name)),
+                expr::ExprKind::ConstExpr(constant) => {
+                    let val = Val::try_from(constant)?;
+                    Ok(AstExpr::Literal(val))
+                }
+                _ => Err(ConversionError::InvalidExpressionKind),
+            }
+        }
+    }
+
+    impl From<IdedExpr> for types::Expr {
+        fn from(ided_expr: IdedExpr) -> Self {
+            types::Expr {
+                id: ided_expr.id as i64,
+                expr_kind: Some(expr::ExprKind::from(ided_expr.expr)),
+            }
+        }
+    }
+
+    impl TryFrom<types::Expr> for IdedExpr {
+        type Error = ConversionError;
+
+        fn try_from(expr: types::Expr) -> Result<Self, Self::Error> {
+            let expr_kind = expr
+                .expr_kind
+                .ok_or_else(|| ConversionError::MissingField {
+                    field: "expr_kind".to_string(),
+                })?;
+
+            let ast_expr = AstExpr::try_from(expr_kind)?;
+
+            Ok(IdedExpr {
+                id: expr.id as u64,
+                expr: ast_expr,
+            })
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
 
         #[test]
         fn test_protobuf_types_accessible() {
-            let _expr = Expr {
+            let _expr = types::Expr {
                 id: 1,
                 expr_kind: None,
             };
@@ -167,6 +229,104 @@ pub mod protobuf {
             };
             let result = Val::try_from(constant);
             assert_eq!(result, Err(ConversionError::InvalidConstantKind));
+        }
+
+        #[test]
+        fn test_expr_ident_conversion() {
+            let ident_expr = AstExpr::Ident("variable_name".to_string());
+            let expr_kind = expr::ExprKind::from(ident_expr.clone());
+
+            if let expr::ExprKind::IdentExpr(ident) = expr_kind {
+                assert_eq!(ident.name, "variable_name");
+            } else {
+                panic!("Expected IdentExpr");
+            }
+
+            let expr_kind = expr::ExprKind::IdentExpr(expr::Ident {
+                name: "test_var".to_string(),
+            });
+            let converted_expr = AstExpr::try_from(expr_kind).unwrap();
+            assert_eq!(converted_expr, AstExpr::Ident("test_var".to_string()));
+        }
+
+        #[test]
+        fn test_expr_literal_conversion() {
+            let literal_expr = AstExpr::Literal(Val::String("hello".to_string()));
+            let expr_kind = expr::ExprKind::from(literal_expr.clone());
+
+            if let expr::ExprKind::ConstExpr(constant) = expr_kind {
+                assert_eq!(
+                    constant.constant_kind,
+                    Some(constant::ConstantKind::StringValue("hello".to_string()))
+                );
+            } else {
+                panic!("Expected ConstExpr");
+            }
+
+            let expr_kind = expr::ExprKind::ConstExpr(Constant {
+                constant_kind: Some(constant::ConstantKind::Int64Value(42)),
+            });
+            let converted_expr = AstExpr::try_from(expr_kind).unwrap();
+            assert_eq!(converted_expr, AstExpr::Literal(Val::Int(42)));
+        }
+
+        #[test]
+        fn test_ided_expr_conversion() {
+            let ided_expr = IdedExpr {
+                id: 123,
+                expr: AstExpr::Ident("my_var".to_string()),
+            };
+            let protobuf_expr = types::Expr::from(ided_expr.clone());
+
+            assert_eq!(protobuf_expr.id, 123);
+            if let Some(expr::ExprKind::IdentExpr(ident)) = protobuf_expr.expr_kind {
+                assert_eq!(ident.name, "my_var");
+            } else {
+                panic!("Expected IdentExpr");
+            }
+
+            let protobuf_expr = types::Expr {
+                id: 456,
+                expr_kind: Some(expr::ExprKind::IdentExpr(expr::Ident {
+                    name: "another_var".to_string(),
+                })),
+            };
+            let converted_ided = IdedExpr::try_from(protobuf_expr).unwrap();
+
+            assert_eq!(converted_ided.id, 456);
+            assert_eq!(
+                converted_ided.expr,
+                AstExpr::Ident("another_var".to_string())
+            );
+        }
+
+        #[test]
+        fn test_expr_conversion_errors() {
+            let protobuf_expr = types::Expr {
+                id: 1,
+                expr_kind: None,
+            };
+            let result = IdedExpr::try_from(protobuf_expr);
+            assert_eq!(
+                result,
+                Err(ConversionError::MissingField {
+                    field: "expr_kind".to_string()
+                })
+            );
+
+            let unsupported_expr_kind = expr::ExprKind::SelectExpr(Box::new(expr::Select {
+                operand: Some(Box::new(types::Expr {
+                    id: 1,
+                    expr_kind: Some(expr::ExprKind::IdentExpr(expr::Ident {
+                        name: "test".to_string(),
+                    })),
+                })),
+                field: "field".to_string(),
+                test_only: false,
+            }));
+
+            let result = AstExpr::try_from(unsupported_expr_kind);
+            assert_eq!(result, Err(ConversionError::InvalidExpressionKind));
         }
     }
 }
